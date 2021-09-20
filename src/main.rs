@@ -11,18 +11,20 @@ use std::path::Path;
 
 const API: &str = "https://hacker-news.firebaseio.com/v0";
 
+// The story and its rank on the HN page
+#[derive(Debug)]
+struct Entry {
+    rank: usize,
+    story: Story,
+}
+
 #[derive(Debug, Deserialize)]
 struct Story {
     by: String,
     descendants: u32,
-    // kids: Vec<u32>,
     id: u32,
     score: u32,
-    // time        int
     title: String,
-    // #[serde(rename = "type")]
-    // typ: String,
-    // url: String,
 }
 
 fn print_usage(program: &str, opts: Options) {
@@ -30,17 +32,17 @@ fn print_usage(program: &str, opts: Options) {
     print!("{}", opts.usage(&brief));
 }
 
-fn read_entries_list<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
+fn read_story_ids<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<u32>> {
     let text = fs::read_to_string(path)?;
-    let entries = text
+    let story_ids = text
         .split('\n')
         .map(|s| s.trim().parse::<u32>().unwrap())
         .collect();
-    Ok(entries)
+    Ok(story_ids)
 }
 
-fn write_entries_list<P: AsRef<Path>>(path: P, entries: &[u32]) -> anyhow::Result<()> {
-    let text = entries
+fn write_story_ids<P: AsRef<Path>>(path: P, story_ids: &[u32]) -> anyhow::Result<()> {
+    let text = story_ids
         .iter()
         .map(|x| x.to_string())
         .collect::<Vec<String>>()
@@ -49,13 +51,15 @@ fn write_entries_list<P: AsRef<Path>>(path: P, entries: &[u32]) -> anyhow::Resul
     Ok(())
 }
 
+// Download a single story from the HN API.
 fn fetch_story(id: u32) -> anyhow::Result<Story> {
     let story =
         reqwest::blocking::get(format!("{api}/item/{id}.json", api = API, id = id))?.json()?;
     Ok(story)
 }
 
-fn fetch_top_stories(num: usize) -> Vec<Story> {
+fn fetch_top_stories(num: usize, known_story_ids: &[u32]) -> Vec<Entry> {
+    // Get the Ids of the top N stories fronm HN.
     let stories_top_ids: Vec<u32> =
         reqwest::blocking::get(format!("{api}/topstories.json", api = API))
             .unwrap()
@@ -65,11 +69,18 @@ fn fetch_top_stories(num: usize) -> Vec<Story> {
             .take(num)
             .collect();
 
-    let stories = stories_top_ids
-        .iter()
-        .filter_map(|id| fetch_story(*id).ok())
-        .collect::<Vec<Story>>();
-    stories
+    // Filter out the stories we already know.
+    // Keep the rank.
+    let mut entries: Vec<Entry> = Vec::new();
+    for (rank, id) in stories_top_ids.iter().enumerate() {
+        if known_story_ids.contains(id) {
+            continue;
+        }
+        if let Ok(story) = fetch_story(*id) {
+            entries.push(Entry { rank, story });
+        }
+    }
+    entries
 }
 
 fn main() {
@@ -109,46 +120,49 @@ fn main() {
     let proj_dir = ProjectDirs::from("com", "github.apahl", "hn").unwrap();
     let config_dir = proj_dir.config_dir();
     fs::create_dir_all(config_dir).unwrap();
-    let entry_fn = config_dir.join("entries.lst");
+    let story_ids_fn = config_dir.join("story_ids.lst");
+
     if !only_new {
-        match fs::remove_file(&entry_fn) {
+        match fs::remove_file(&story_ids_fn) {
             Err(_) => println!("Could not remove entries list"),
             Ok(_) => println!("Removed entries list"),
         }
     }
+
     println!("Fetching {} stories...", number);
-    let mut stories = fetch_top_stories(number);
-    let mut entries_list: Vec<u32> = vec![];
+    let mut story_ids: Vec<u32> = Vec::new();
     if only_new {
         println!("(downloading only new stories)");
-        if let Ok(el) = read_entries_list(&entry_fn) {
-            // stories = stories.iter().filter(|s| !entries_list.contains(&s.id));
-            entries_list = el;
-            stories.retain(|s| !entries_list.contains(&s.id));
+        if let Ok(sids) = read_story_ids(&story_ids_fn) {
+            story_ids = sids;
         } else {
             println!("Could not read entries list.");
         }
     }
-    entries_list.extend(stories.iter().map(|s| s.id).collect::<Vec<u32>>());
-    match write_entries_list(&entry_fn, &entries_list) {
-        Err(e) => println!("Could not write entries list: {}", e),
-        Ok(_) => println!("Wrote entries list"),
+
+    let entries = fetch_top_stories(number, &story_ids);
+
+    // Add the new entries to the list of stories we already know:
+    story_ids.extend(entries.iter().map(|e| e.story.id).collect::<Vec<u32>>());
+    match write_story_ids(&story_ids_fn, &story_ids) {
+        Err(e) => println!("Could not write story ids: {}", e),
+        Ok(_) => println!("Wrote story ids"),
     }
-    for (idx, story) in stories.iter().enumerate() {
+
+    for entry in entries.iter() {
         println!(
-            "{}. {}",
-            format!("{:2}", idx + 1).bold(),
-            story.title.bold()
+            "{}",
+            format!("{:2}. {}", entry.rank + 1, entry.story.title).bold()
         );
         println!(
             "    score: {score}    comments: {comments}    user: {user}",
-            score = story.score,
-            comments = story.descendants,
-            user = story.by
+            score = entry.story.score,
+            comments = entry.story.descendants,
+            user = entry.story.by
         );
         let url = format!(
             "    url: https://news.ycombinator.com/item?id={id}",
-            id = story.id
+            id = entry.story.id
         );
         println!("{}\n", url.dimmed());
     }
