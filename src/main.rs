@@ -28,7 +28,10 @@ struct Story {
 }
 
 fn print_usage(program: &str, opts: Options) {
-    let brief = format!("Hacker news downloader.\nUsage: {} [-n <number>]", program);
+    let brief = format!(
+        "Hacker news downloader.\nUsage: {} [-n <number>] [-o]",
+        program
+    );
     print!("{}", opts.usage(&brief));
 }
 
